@@ -98,6 +98,8 @@ jobs:
         run: |
           ssh -i ec2-key.pem \
             -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
             ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'SETUP_SCRIPT'
           set -e
           mkdir -p ~/app
@@ -126,6 +128,8 @@ jobs:
         run: |
           scp -i ec2-key.pem \
             -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
             docker-compose.yml \
             ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/app/docker-compose.yml
 
@@ -133,6 +137,8 @@ jobs:
         run: |
           ssh -i ec2-key.pem \
             -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
             ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << DEPLOY_SCRIPT
           set -e
           cd ~/app
@@ -148,11 +154,35 @@ jobs:
           # Pull latest images
           sudo -E docker compose pull
 
-          # Restart services (infra stays up, app services get updated)
+          # Stop existing app containers (keep infra running)
+          sudo -E docker compose up -d --remove-orphans --no-deps kafka auth-service-db patient-service-db billing-service
+
+          # Wait for infrastructure to be ready
+          echo "⏳ Waiting for infrastructure containers..."
+          for i in {1..40}; do
+            if sudo docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list > /dev/null 2>&1; then
+              echo "✅ Kafka is ready"
+              break
+            fi
+            echo "  Waiting for Kafka... (\$i/40)"
+            sleep 5
+          done
+
+          for i in {1..20}; do
+            if sudo docker exec auth-service-db pg_isready -U admin_user > /dev/null 2>&1 && \
+               sudo docker exec patient-service-db pg_isready -U admin_user > /dev/null 2>&1; then
+              echo "✅ Databases are ready"
+              break
+            fi
+            echo "  Waiting for databases... (\$i/20)"
+            sleep 3
+          done
+
+          # Now bring up all app services
           sudo -E docker compose up -d --remove-orphans
 
-          # Wait for services to start
-          echo "⏳ Waiting 30s for services to start..."
+          # Wait for app services to start
+          echo "⏳ Waiting 30s for app services to start..."
           sleep 30
 
           echo "=== Container Status ==="
