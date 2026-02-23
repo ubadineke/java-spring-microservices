@@ -1,0 +1,235 @@
+name: CD - Deploy to AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+  JAVA_VERSION: "21"
+  NODE_VERSION: "20"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Phase 1: Run all unit tests before any deployment
+  # ---------------------------------------------------------------------------
+  test:
+    name: Run All Tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        service:
+          - auth-service
+          - patient-service
+          - billing-service
+          - analytics-service
+          - api-gateway
+    defaults:
+      run:
+        working-directory: ${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      - name: Run tests
+        run: ./mvnw verify -B
+
+  # ---------------------------------------------------------------------------
+  # Phase 2: Build Docker images and push to ECR (all services in parallel)
+  # ---------------------------------------------------------------------------
+  build-and-push:
+    name: Build & Push ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - service: auth-service
+            dockerfile: auth-service/Dockerfile
+            context: auth-service
+          - service: patient-service
+            dockerfile: patient-service/Dockerfile
+            context: patient-service
+          - service: billing-service
+            dockerfile: billing-service/Dockerfile
+            context: billing-service
+          - service: analytics-service
+            dockerfile: analytics-service/Dockerfile
+            context: analytics-service
+          - service: api-gateway
+            dockerfile: api-gateway/Dockerfile
+            context: api-gateway
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Create ECR repository if not exists
+        run: |
+          aws ecr describe-repositories \
+            --repository-names ${{ matrix.service }} \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || \
+          aws ecr create-repository \
+            --repository-name ${{ matrix.service }} \
+            --region ${{ env.AWS_REGION }} \
+            --image-scanning-configuration scanOnPush=true
+
+      - name: Build, tag, and push Docker image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          REPO: ${{ env.ECR_REGISTRY }}/${{ matrix.service }}
+        run: |
+          docker build \
+            -t $REPO:$IMAGE_TAG \
+            -t $REPO:latest \
+            -f ${{ matrix.dockerfile }} \
+            ${{ matrix.context }}
+          docker push $REPO:$IMAGE_TAG
+          docker push $REPO:latest
+
+  # ---------------------------------------------------------------------------
+  # Phase 3: Deploy infrastructure and services via CDK
+  # ---------------------------------------------------------------------------
+  deploy-infrastructure:
+    name: Deploy Infrastructure (CDK)
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    defaults:
+      run:
+        working-directory: infrastructure
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      - name: Set up Node.js (required by CDK CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install AWS CDK CLI
+        run: npm install -g aws-cdk
+
+      - name: Compile CDK app
+        run: mvn compile -B
+
+      - name: CDK Synth
+        run: |
+          cdk synth \
+            --app "mvn -e -q exec:java -Dexec.mainClass=com.pm.stack.LocalStack" \
+            --context imageTag=${{ github.sha }} \
+            --context ecrRegistry=${{ env.ECR_REGISTRY }}
+
+      - name: CDK Diff (preview changes)
+        run: |
+          cdk diff \
+            --app "mvn -e -q exec:java -Dexec.mainClass=com.pm.stack.LocalStack" \
+            --context imageTag=${{ github.sha }} \
+            --context ecrRegistry=${{ env.ECR_REGISTRY }} \
+          || true
+
+      - name: CDK Deploy
+        run: |
+          cdk deploy --all --require-approval never \
+            --app "mvn -e -q exec:java -Dexec.mainClass=com.pm.stack.LocalStack" \
+            --context imageTag=${{ github.sha }} \
+            --context ecrRegistry=${{ env.ECR_REGISTRY }}
+
+      - name: Get ALB DNS name
+        id: alb
+        run: |
+          ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --query "LoadBalancers[0].DNSName" --output text)
+          echo "alb_dns=$ALB_DNS" >> "$GITHUB_OUTPUT"
+          echo "### 🌐 ALB Endpoint" >> "$GITHUB_STEP_SUMMARY"
+          echo "http://$ALB_DNS" >> "$GITHUB_STEP_SUMMARY"
+    outputs:
+      alb_dns: ${{ steps.alb.outputs.alb_dns }}
+
+  # ---------------------------------------------------------------------------
+  # Phase 4: Wait for ECS services to stabilise
+  # ---------------------------------------------------------------------------
+  wait-for-services:
+    name: Wait for ECS Services to Stabilise
+    runs-on: ubuntu-latest
+    needs: deploy-infrastructure
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Wait for ECS services
+        run: |
+          CLUSTER="PatientManagementCluster"
+          SERVICES=("auth-service" "billing-service" "analytics-service" "patient-service" "api-gateway")
+
+          for SERVICE in "${SERVICES[@]}"; do
+            echo "⏳ Waiting for $SERVICE to stabilise..."
+            aws ecs wait services-stable \
+              --cluster "$CLUSTER" \
+              --services "$SERVICE" \
+              --region ${{ env.AWS_REGION }} \
+            || echo "⚠️  Timeout waiting for $SERVICE"
+          done
+          echo "✅ All services stable"
+
+  # ---------------------------------------------------------------------------
+  # Phase 5: Smoke / integration tests against the deployed environment
+  # ---------------------------------------------------------------------------
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure, wait-for-services]
+    defaults:
+      run:
+        working-directory: integration-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      - name: Run integration tests against ALB
+        env:
+          BASE_URL: http://${{ needs.deploy-infrastructure.outputs.alb_dns }}
+        run: |
+          mvn verify -B \
+            -Dbase.url="$BASE_URL"
