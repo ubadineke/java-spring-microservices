@@ -94,14 +94,32 @@ jobs:
           echo "${{ secrets.EC2_SSH_KEY }}" > ec2-key.pem
           chmod 600 ec2-key.pem
 
-      - name: Ensure app directory exists and Docker is installed on EC2
+      - name: Copy docker-compose.yml to EC2
         run: |
-          ssh -i ec2-key.pem \
-            -o StrictHostKeyChecking=no \
-            -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=10 \
-            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'SETUP_SCRIPT'
+          for i in 1 2 3 4 5; do
+            scp -i ec2-key.pem \
+              -o StrictHostKeyChecking=no \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=10 \
+              -o ConnectTimeout=30 \
+              docker-compose.yml \
+              ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/app/docker-compose.yml && break
+            echo "⚠️ SCP attempt $i failed, retrying in 15s..."
+            sleep 15
+          done
+
+      - name: Setup and Deploy services on EC2
+        run: |
+          for i in 1 2 3 4 5; do
+            ssh -i ec2-key.pem \
+              -o StrictHostKeyChecking=no \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=10 \
+              -o ConnectTimeout=30 \
+              ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << DEPLOY_SCRIPT && break
           set -e
+
+          # --- Setup ---
           mkdir -p ~/app
 
           # Install Docker if not present
@@ -112,35 +130,18 @@ jobs:
             sudo install -m 0755 -d /etc/apt/keyrings
             sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
             sudo chmod a+r /etc/apt/keyrings/docker.asc
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            echo "deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \$(. /etc/os-release && echo "\$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
             sudo apt-get update -y
             sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-            sudo usermod -aG docker $USER
+            sudo usermod -aG docker \$USER
             sudo systemctl enable docker
             sudo systemctl start docker
             echo "✅ Docker installed"
           else
             echo "✅ Docker already installed"
           fi
-          SETUP_SCRIPT
 
-      - name: Copy docker-compose.yml to EC2
-        run: |
-          scp -i ec2-key.pem \
-            -o StrictHostKeyChecking=no \
-            -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=10 \
-            docker-compose.yml \
-            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/app/docker-compose.yml
-
-      - name: Deploy services on EC2
-        run: |
-          ssh -i ec2-key.pem \
-            -o StrictHostKeyChecking=no \
-            -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=10 \
-            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << DEPLOY_SCRIPT
-          set -e
+          # --- Deploy ---
           cd ~/app
 
           # Login to Docker Hub
@@ -154,27 +155,27 @@ jobs:
           # Pull latest images
           sudo -E docker compose pull
 
-          # Stop existing app containers (keep infra running)
+          # Start infrastructure first
           sudo -E docker compose up -d --remove-orphans --no-deps kafka auth-service-db patient-service-db billing-service
 
           # Wait for infrastructure to be ready
           echo "⏳ Waiting for infrastructure containers..."
-          for i in {1..40}; do
+          for j in \$(seq 1 40); do
             if sudo docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list > /dev/null 2>&1; then
               echo "✅ Kafka is ready"
               break
             fi
-            echo "  Waiting for Kafka... (\$i/40)"
+            echo "  Waiting for Kafka... (\$j/40)"
             sleep 5
           done
 
-          for i in {1..20}; do
+          for j in \$(seq 1 20); do
             if sudo docker exec auth-service-db pg_isready -U admin_user > /dev/null 2>&1 && \
                sudo docker exec patient-service-db pg_isready -U admin_user > /dev/null 2>&1; then
               echo "✅ Databases are ready"
               break
             fi
-            echo "  Waiting for databases... (\$i/20)"
+            echo "  Waiting for databases... (\$j/20)"
             sleep 3
           done
 
@@ -198,6 +199,9 @@ jobs:
             fi
           done
           DEPLOY_SCRIPT
+            echo "⚠️ SSH attempt $i failed, retrying in 15s..."
+            sleep 15
+          done
 
       - name: Cleanup PEM key
         if: always()
