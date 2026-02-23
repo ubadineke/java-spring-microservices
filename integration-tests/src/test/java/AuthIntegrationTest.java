@@ -10,7 +10,7 @@ public class AuthIntegrationTest {
 
   @BeforeAll
   static void setUp(){
-    RestAssured.baseURI = "http://localhost:4004";
+    RestAssured.baseURI = System.getProperty("base.url", "http://localhost:4004");
   }
 
   @Test
