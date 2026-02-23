@@ -39,7 +39,7 @@ services:
     restart: unless-stopped
 
   kafka:
-    image: bitnami/kafka:latest
+    image: bitnami/kafka:3.9
     container_name: kafka
     environment:
       KAFKA_CFG_NODE_ID: 0
