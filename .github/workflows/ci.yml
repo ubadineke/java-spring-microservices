@@ -30,7 +30,9 @@ jobs:
           cache: maven
 
       - name: Run tests
-        run: ./mvnw verify -B
+        run: |
+          chmod +x ./mvnw
+          ./mvnw verify -B
 
   test-patient-service:
     name: Test Patient Service
@@ -49,7 +51,9 @@ jobs:
           cache: maven
 
       - name: Run tests
-        run: ./mvnw verify -B
+        run: |
+          chmod +x ./mvnw
+          ./mvnw verify -B
 
   test-billing-service:
     name: Test Billing Service
@@ -68,7 +72,9 @@ jobs:
           cache: maven
 
       - name: Run tests
-        run: ./mvnw verify -B
+        run: |
+          chmod +x ./mvnw
+          ./mvnw verify -B
 
   test-analytics-service:
     name: Test Analytics Service
@@ -87,7 +93,9 @@ jobs:
           cache: maven
 
       - name: Run tests
-        run: ./mvnw verify -B
+        run: |
+          chmod +x ./mvnw
+          ./mvnw verify -B
 
   test-api-gateway:
     name: Test API Gateway
@@ -106,4 +114,6 @@ jobs:
           cache: maven
 
       - name: Run tests
-        run: ./mvnw verify -B
+        run: |
+          chmod +x ./mvnw
+          ./mvnw verify -B

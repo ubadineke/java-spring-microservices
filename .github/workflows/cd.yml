@@ -38,7 +38,9 @@ jobs:
           cache: maven
 
       - name: Run tests
-        run: ./mvnw verify -B
+        run: |
+          chmod +x ./mvnw
+          ./mvnw verify -B
 
   # ---------------------------------------------------------------------------
   # Phase 2: Build Docker images and push to Docker Hub
