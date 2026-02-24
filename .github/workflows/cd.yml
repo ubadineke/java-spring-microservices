@@ -96,31 +96,27 @@ jobs:
 
       - name: Copy docker-compose.yml to EC2
         run: |
-          for i in 1 2 3 4 5; do
-            scp -i ec2-key.pem \
-              -o StrictHostKeyChecking=no \
-              -o ServerAliveInterval=30 \
-              -o ServerAliveCountMax=10 \
-              -o ConnectTimeout=30 \
-              docker-compose.yml \
-              ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/app/docker-compose.yml && break
-            echo "⚠️ SCP attempt $i failed, retrying in 15s..."
-            sleep 15
-          done
+          # Ensure ~/app directory exists first
+          ssh -i ec2-key.pem \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=30 \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "mkdir -p ~/app"
+
+          scp -i ec2-key.pem \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=30 \
+            docker-compose.yml \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/app/docker-compose.yml
 
       - name: Setup and Deploy services on EC2
         run: |
-          for i in 1 2 3 4 5; do
-            ssh -i ec2-key.pem \
-              -o StrictHostKeyChecking=no \
-              -o ServerAliveInterval=30 \
-              -o ServerAliveCountMax=10 \
-              -o ConnectTimeout=30 \
-              ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << DEPLOY_SCRIPT && break
+          ssh -i ec2-key.pem \
+            -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
+            -o ConnectTimeout=30 \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << DEPLOY_SCRIPT
           set -e
-
-          # --- Setup ---
-          mkdir -p ~/app
 
           # Install Docker if not present
           if ! command -v docker &> /dev/null; then
@@ -143,6 +139,12 @@ jobs:
 
           # --- Deploy ---
           cd ~/app
+
+          # Verify docker-compose.yml exists
+          if [ ! -f docker-compose.yml ]; then
+            echo "❌ docker-compose.yml not found in ~/app!"
+            exit 1
+          fi
 
           # Login to Docker Hub
           echo "${{ secrets.DOCKERHUB_TOKEN }}" | \
@@ -199,9 +201,6 @@ jobs:
             fi
           done
           DEPLOY_SCRIPT
-            echo "⚠️ SSH attempt $i failed, retrying in 15s..."
-            sleep 15
-          done
 
       - name: Cleanup PEM key
         if: always()
