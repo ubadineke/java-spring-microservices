@@ -80,12 +80,41 @@ jobs:
           docker push $REPO:latest
 
   # ---------------------------------------------------------------------------
+  # Phase 2b: Build & Push Frontend (Node-based, separate from Java services)
+  # ---------------------------------------------------------------------------
+  build-and-push-frontend:
+    name: Build & Push Frontend
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build, tag, and push Frontend Docker image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          REPO: ${{ secrets.DOCKERHUB_USERNAME }}/frontend
+        run: |
+          docker build \
+            -t $REPO:$IMAGE_TAG \
+            -t $REPO:latest \
+            -f frontend/Dockerfile \
+            frontend
+          docker push $REPO:$IMAGE_TAG
+          docker push $REPO:latest
+
+  # ---------------------------------------------------------------------------
   # Phase 3: Deploy to EC2 via SSH
   # ---------------------------------------------------------------------------
   deploy:
     name: Deploy to EC2
     runs-on: ubuntu-latest
-    needs: build-and-push
+    needs: [build-and-push, build-and-push-frontend]
     steps:
       - uses: actions/checkout@v4
 
@@ -193,7 +222,7 @@ jobs:
 
           # Basic health checks
           echo "=== Health Checks ==="
-          for port in 4005 4001 4002 4000 4004; do
+          for port in 4005 4001 4002 4000 4004 80; do
             if curl -sf -o /dev/null --max-time 5 http://localhost:\$port; then
               echo "✅ Port \$port is responding"
             else
