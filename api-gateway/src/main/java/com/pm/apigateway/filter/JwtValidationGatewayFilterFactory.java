@@ -35,7 +35,11 @@ public class JwtValidationGatewayFilterFactory extends
           .header(HttpHeaders.AUTHORIZATION, token)
           .retrieve()
           .toBodilessEntity()
-          .then(chain.filter(exchange));
+          .flatMap(response -> chain.filter(exchange))
+          .onErrorResume(e -> {
+            exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
+            return exchange.getResponse().setComplete();
+          });
     };
   }
 }

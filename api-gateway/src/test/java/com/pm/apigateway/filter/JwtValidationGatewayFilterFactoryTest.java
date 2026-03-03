@@ -89,7 +89,7 @@ class JwtValidationGatewayFilterFactoryTest {
     when(requestHeadersUriSpec.uri(anyString())).thenReturn(requestHeadersSpec);
     when(requestHeadersSpec.header(anyString(), anyString())).thenReturn(requestHeadersSpec);
     when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
-    when(responseSpec.toBodilessEntity()).thenReturn(Mono.empty());
+    when(responseSpec.toBodilessEntity()).thenReturn(Mono.just(org.springframework.http.ResponseEntity.ok().build()));
 
     GatewayFilter filter = filterFactory.apply(new Object());
     
@@ -97,5 +97,33 @@ class JwtValidationGatewayFilterFactoryTest {
 
     StepVerifier.create(result).verifyComplete();
     verify(chain).filter(exchange);
+  }
+
+  @Test
+  void shouldReturnUnauthorizedWhenAuthServiceReturns401() {
+    String token = "Bearer valid-token";
+    MockServerHttpRequest request = MockServerHttpRequest.get("/api/patients")
+        .header(HttpHeaders.AUTHORIZATION, token)
+        .build();
+    MockServerWebExchange exchange = MockServerWebExchange.from(request);
+    GatewayFilterChain chain = mock(GatewayFilterChain.class);
+    when(chain.filter(any())).thenReturn(Mono.empty());
+
+    when(webClient.get()).thenReturn(requestHeadersUriSpec);
+    when(requestHeadersUriSpec.uri(anyString())).thenReturn(requestHeadersSpec);
+    when(requestHeadersSpec.header(anyString(), anyString())).thenReturn(requestHeadersSpec);
+    when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
+    
+    // Simulate 401 Unauthorized from Auth Service
+    when(responseSpec.toBodilessEntity()).thenReturn(
+        Mono.error(new org.springframework.web.reactive.function.client.WebClientResponseException(
+            401, "Unauthorized", null, null, null)));
+
+    GatewayFilter filter = filterFactory.apply(new Object());
+
+    Mono<Void> result = filter.filter(exchange, chain);
+
+    StepVerifier.create(result).verifyComplete();
+    assertEquals(HttpStatus.UNAUTHORIZED, exchange.getResponse().getStatusCode());
   }
 }
